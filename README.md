@@ -25,3 +25,11 @@ Shine:
 8. Decrypts the metadata using the header properties and raw keys
 9. Re-writes the metadata sections to their appropriate locations and corrects the re-ordered type definitions
 10. Writes the fully decrypted "global-metadata.dat" to the location of the Glitter exe
+
+## "it's not working for me"
+your account endpoint might not be the same "gw-pvp.escapefromtarkov.com", use fiddler and do it manually<br>
+if you cannot comprehend a text-based tutorial on UC, here's a video: https://www.youtube.com/watch?v=jIMAjZV7v14 <br>
+tools used: [Fiddler Classic](https://www.telerik.com/download/fiddler) , [Tarkov IL2CPP Decryption Thread](https://www.unknowncheats.me/forum/escape-from-tarkov/726047-tarkov-il2cpp-decryption.html) , [CPP2IL](https://github.com/SamboyCoding/Cpp2IL)
+
+## credits
+"Beakers" for the actual IL2CPP decryption, which you can find on UC [here](https://www.unknowncheats.me/forum/escape-from-tarkov/726047-tarkov-il2cpp-decryption.html)
