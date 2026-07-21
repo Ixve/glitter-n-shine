@@ -32,5 +32,5 @@ if you cannot comprehend a text-based tutorial on UC, here's a video: https://ww
 tools used: [Fiddler Classic](https://www.telerik.com/download/fiddler) , [Tarkov IL2CPP Decryption Thread](https://www.unknowncheats.me/forum/escape-from-tarkov/726047-tarkov-il2cpp-decryption.html) , [CPP2IL](https://github.com/SamboyCoding/Cpp2IL)
 
 ## credits
-"Beakers" for the actual IL2CPP decryption, which you can find on UC [here](https://www.unknowncheats.me/forum/escape-from-tarkov/726047-tarkov-il2cpp-decryption.html)
+"Beakers" for the actual IL2CPP decryption, which you can find on UC [here](https://www.unknowncheats.me/forum/escape-from-tarkov/726047-tarkov-il2cpp-decryption.html)<br>
 AI for writing the code because i'm too lazy to write all this shit in C++ , i'd rather stick to being an angelscript/enma warrior. s/o pcx my beloved.
