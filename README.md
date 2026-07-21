@@ -33,3 +33,4 @@ tools used: [Fiddler Classic](https://www.telerik.com/download/fiddler) , [Tarko
 
 ## credits
 "Beakers" for the actual IL2CPP decryption, which you can find on UC [here](https://www.unknowncheats.me/forum/escape-from-tarkov/726047-tarkov-il2cpp-decryption.html)
+AI for writing the code because i'm too lazy to write all this shit in C++ , i'd rather stick to being an angelscript/enma warrior. s/o pcx my beloved.
