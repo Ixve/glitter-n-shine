@@ -9,22 +9,29 @@ Shine -> Payload
 Simple.
 
 Glitter:
-1. Uses the registry to locate the BSG Launcher installation folder
-2. Launches BSGLauncher.exe with the CREATE_SUSPENDED flag
-3. Drops the Shine payload into %TEMP% (shine_<procid>.dll)
-4. Injects Shine into BSGLauncher.exe via LoadLibraryW
+1. Prompts to use the Steam (Using a steam://run/appid URI) or direct BSG launcher installation (which will use the Registry to find the installation folder)
+2. Prompts the folder to output the final files into
+3. Kills EscapeFromTarkov.exe and BSGLauncher.exe to prevent issues
+4. Starts the launcher via previously selected technique
+5. Drops Shine into %TEMP%
+6. Injects it into BSGLauncher.exe
 
 Shine:
-1. Hooks "EncryptMessage" in secur32.dll (or fallback sspicli.dll)
-2. Waits on the "launcher/game/start" endpoint
-3. Blocks the request from going out (to prevent game from even launching)
-4. Replays the request
-5. Decrypts the response and parses the session key returned by the server
-6. Uses the session key to send a request to "/client/metadata"
-7. Decrypts the "global-metadata.dat" header to parse its version, request key and any raw subkeys
-8. Decrypts the metadata using the header properties and raw keys
-9. Re-writes the metadata sections to their appropriate locations and corrects the re-ordered type definitions
-10. Writes the fully decrypted "global-metadata.dat" to the location of the Glitter exe
+1. Allocates a console in the launcher
+2. Redirects STDOUT to NUL to prevent the launchers log spam (albeit I do not care about the CEF error spam as it is minor)
+3. Hooks EncryptMessage within secur32.dll (or fallback sspicli.dll)
+4. Captures the Bearer token, PHPSESSID, User-Agent and launcher version
+5. Gets the latest EFT version from /launcher/game-updates/eft
+6. Resolves the CDN endpoint from /launcher/game-installation/eft
+7. Gets the ConsistencyInfo manifest
+8. Checks the output folder for the following files to see if they're up to date or if they exist: "GameAssembly.dll", "UnityPlayer.dll", "EscapeFromTarkov.exe", "globalgamemanagers", "global-metadata.dat"
+9. Downloads whatever files are necessary, or replaces them if they're outdated, corrupted, etc (As they are needed for IL2CPPDumper/CPP2IL generation)
+10. Calls IGameBackendService.GetGameSessionAsync in memory (due to the HWID logging etc that it sends)
+11. Uses the session key to send a request to /client/metadata
+12. Decrypts the global-metadata.dat header to parse the version, request keys and any raw subkeys
+13. Decrypts the metadata using the header properties and raw keys
+14. Re-writes the metadata sections to their appropriate locations and corrects the re-ordered type definitions
+15. Writes the fully decrypted global-metadata.dat to the provided output folder location, alongside the rest of the files
 
 ## "it's not working for me"
 your account endpoint might not be the same "gw-pvp.escapefromtarkov.com", use fiddler and do it manually<br>
