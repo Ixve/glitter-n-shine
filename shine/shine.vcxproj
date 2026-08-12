@@ -54,21 +54,30 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding Condition="'$(Configuration)'=='Release'">true</EnableCOMDATFolding>
       <OptimizeReferences Condition="'$(Configuration)'=='Release'">true</OptimizeReferences>
-      <AdditionalDependencies Condition="'$(Configuration)'=='Debug'">zsd.lib;winhttp.lib;bcrypt.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalDependencies Condition="'$(Configuration)'=='Release'">zs.lib;winhttp.lib;bcrypt.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Configuration)'=='Debug'">zsd.lib;winhttp.lib;bcrypt.lib;advapi32.lib;mscoree.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Configuration)'=='Release'">zs.lib;winhttp.lib;bcrypt.lib;advapi32.lib;mscoree.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="decode.cpp" />
     <ClCompile Include="meta.cpp" />
+    <ClCompile Include="dist.cpp" />
+    <ClCompile Include="session.cpp" />
     <ClCompile Include="..\deps\detours\detours.cpp" />
     <ClCompile Include="..\deps\detours\disasm.cpp" />
     <ClCompile Include="..\deps\detours\modules.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ResourceCompile Include="shine.rc" />
+  </ItemGroup>
+  <ItemGroup>
     <ClInclude Include="decode.h" />
     <ClInclude Include="meta.h" />
+    <ClInclude Include="dist.h" />
+    <ClInclude Include="session.h" />
+    <ClInclude Include="res.h" />
+    <ClInclude Include="self.h" />
     <ClInclude Include="..\deps\detours\detours.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -1,0 +1,2 @@
+#include "res.h"
+IDR_BRIDGE RCDATA "bridge.dll"

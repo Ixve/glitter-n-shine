@@ -102,60 +102,6 @@ deshuffle(const std::vector<uint8_t> &input) {
   return std::vector<uint8_t>(buf.begin() + 4, buf.begin() + 4 + sz);
 }
 
-static std::wstring find_meta() {
-  constexpr const wchar_t *base =
-      L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
-  constexpr const wchar_t *rel =
-      L"EscapeFromTarkov_Data\\il2cpp_data\\Metadata\\global-metadata.dat";
-  const HKEY roots[] = {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER};
-  const REGSAM views[] = {KEY_WOW64_32KEY, KEY_WOW64_64KEY};
-  for (HKEY root : roots) {
-    for (REGSAM view : views) {
-      HKEY list = nullptr;
-      if (RegOpenKeyExW(root, base, 0, KEY_READ | view, &list) != ERROR_SUCCESS)
-        continue;
-      wchar_t name[256];
-      for (DWORD i = 0;; ++i) {
-        DWORD len = static_cast<DWORD>(std::size(name));
-        if (RegEnumKeyExW(list, i, name, &len, nullptr, nullptr, nullptr,
-                          nullptr) != ERROR_SUCCESS)
-          break;
-        HKEY key = nullptr;
-        if (RegOpenKeyExW(list, name, 0, KEY_READ, &key) != ERROR_SUCCESS)
-          continue;
-        wchar_t title[512] = {};
-        DWORD titleSize = sizeof(title);
-        RegQueryValueExW(key, L"DisplayName", nullptr, nullptr,
-                         reinterpret_cast<BYTE *>(title), &titleSize);
-        if (wcsstr(title, L"Escape from Tarkov")) {
-          DWORD size = 0;
-          DWORD type = 0;
-          if (RegQueryValueExW(key, L"InstallLocation", nullptr, &type, nullptr,
-                               &size) == ERROR_SUCCESS &&
-              (type == REG_SZ || type == REG_EXPAND_SZ) &&
-              size >= sizeof(wchar_t)) {
-            std::wstring dir(size / sizeof(wchar_t), L'\0');
-            if (RegQueryValueExW(key, L"InstallLocation", nullptr, &type,
-                                 reinterpret_cast<BYTE *>(dir.data()),
-                                 &size) == ERROR_SUCCESS) {
-              dir.resize(wcsnlen_s(dir.c_str(), dir.size()));
-              std::filesystem::path path = std::filesystem::path(dir) / rel;
-              if (std::filesystem::is_regular_file(path)) {
-                RegCloseKey(key);
-                RegCloseKey(list);
-                return path.wstring();
-              }
-            }
-          }
-        }
-        RegCloseKey(key);
-      }
-      RegCloseKey(list);
-    }
-  }
-  return {};
-}
-
 static bool header(std::vector<uint8_t> &m, size_t size) {
   printf("[?] Decrypting header...\n");
   fflush(stdout);
@@ -501,71 +447,27 @@ static bool reorder(std::vector<uint8_t> &m, uint32_t key) {
 }
 
 namespace meta {
-void run(const std::vector<uint8_t> &decodedJson, const wchar_t *outputDir, const wchar_t *userAgent) {
+bool decrypt(std::vector<uint8_t> metadata, uint64_t fileTime,
+             const std::string &session, const wchar_t *outputDir,
+             const wchar_t *userAgent) {
 
-  std::string json(decodedJson.begin(), decodedJson.end());
-  std::string session = field(json, "session");
   if (session.empty()) {
-    printf("[-] Could not parse session key from response JSON\n");
+    printf("[-] No game session supplied\n");
     fflush(stdout);
-    return;
+    return false;
   }
-  printf("[?] Searching for EscapeFromTarkov...\n");
-  fflush(stdout);
-  std::wstring metaPath = find_meta();
-  if (metaPath.empty()) {
-    printf("[-] Could not locate global-metadata.dat\n");
+  if (metadata.size() < 0x400) {
+    printf("[-] Metadata too small (%zu bytes)\n", metadata.size());
     fflush(stdout);
-    return;
+    return false;
   }
-  char metaPathA[MAX_PATH * 2] = {};
-  WideCharToMultiByte(CP_ACP, 0, metaPath.c_str(), -1, metaPathA,
-                      sizeof(metaPathA), nullptr, nullptr);
-  printf("[+] EFT:     %s\n", metaPathA);
-  fflush(stdout);
-
-  HANDLE hFile =
-      CreateFileW(metaPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (hFile == INVALID_HANDLE_VALUE) {
-    printf("[-] Cannot open global-metadata.dat (err=%lu)\n", GetLastError());
-    fflush(stdout);
-    return;
-  }
-
-  FILETIME ftCreate = {};
-  uint64_t fileTime = ((uint64_t)ftCreate.dwHighDateTime << 32) |
-                      (uint64_t)ftCreate.dwLowDateTime;
-
-  LARGE_INTEGER fileSize = {};
-  if (!GetFileTime(hFile, &ftCreate, nullptr, nullptr) ||
-      !GetFileSizeEx(hFile, &fileSize) || fileSize.QuadPart < 0x400 ||
-      fileSize.QuadPart > MAXDWORD) {
-    CloseHandle(hFile);
-    printf("[-] Invalid global-metadata.dat\n");
-    fflush(stdout);
-    return;
-  }
-  fileTime = ((uint64_t)ftCreate.dwHighDateTime << 32) |
-             (uint64_t)ftCreate.dwLowDateTime;
-  std::vector<uint8_t> metadata((size_t)fileSize.QuadPart);
-  DWORD bytesRead = 0;
-  BOOL read = ReadFile(hFile, metadata.data(), (DWORD)fileSize.QuadPart,
-                       &bytesRead, nullptr);
-  CloseHandle(hFile);
-
-  if (!read || bytesRead != (DWORD)fileSize.QuadPart) {
-    printf("[-] Partial read of global-metadata.dat\n");
-    fflush(stdout);
-    return;
-  }
-  printf("[?] Loaded global-metadata.dat (%zu bytes)\n", metadata.size());
+  printf("[?] Decrypting global-metadata.dat (%zu bytes)\n", metadata.size());
   fflush(stdout);
 
   if (rd32(metadata.data()) == 0xFAB11BAFu) {
-    printf("[+] Metadata already decrypted - skipping\n");
+    printf("[+] Metadata already decrypted - nothing to do\n");
     fflush(stdout);
-    return;
+    return false;
   }
 
   uint32_t subKey =
@@ -576,13 +478,13 @@ void run(const std::vector<uint8_t> &decodedJson, const wchar_t *outputDir, cons
 
   const int HEADER_SIZE = 0x200;
   if (!header(metadata, HEADER_SIZE))
-    return;
+    return false;
 
   auto vi = version(metadata, subKey);
   if (!vi) {
     printf("[-] Invalid encrypted metadata header\n");
     fflush(stdout);
-    return;
+    return false;
   }
   printf("[+] Version:     %s\n", vi->version.c_str());
   printf("[+] Request key: %s\n", vi->requestKey.c_str());
@@ -595,7 +497,7 @@ void run(const std::vector<uint8_t> &decodedJson, const wchar_t *outputDir, cons
   if (props.empty()) {
     printf("[-] Failed to obtain header properties from server\n");
     fflush(stdout);
-    return;
+    return false;
   }
   printf("[+] Server returned %zu sections\n", props.size());
   fflush(stdout);
@@ -605,13 +507,13 @@ void run(const std::vector<uint8_t> &decodedJson, const wchar_t *outputDir, cons
   if (!reinsert(metadata, props, vi->key)) {
     printf("[-] Invalid metadata sections\n");
     fflush(stdout);
-    return;
+    return false;
   }
 
   if (!reorder(metadata, vi->key)) {
     printf("[-] Invalid type definitions\n");
     fflush(stdout);
-    return;
+    return false;
   }
 
   std::wstring outPath = outputDir;
@@ -630,7 +532,7 @@ void run(const std::vector<uint8_t> &decodedJson, const wchar_t *outputDir, cons
   if (hOut == INVALID_HANDLE_VALUE) {
     printf("[-] Cannot create output file (err=%lu)\n", GetLastError());
     fflush(stdout);
-    return;
+    return false;
   }
   DWORD written = 0;
   BOOL wrote = WriteFile(hOut, metadata.data(), (DWORD)metadata.size(), &written,
@@ -642,10 +544,11 @@ void run(const std::vector<uint8_t> &decodedJson, const wchar_t *outputDir, cons
     DeleteFileW(outPath.c_str());
     printf("[-] Failed to write output file\n");
     fflush(stdout);
-    return;
+    return false;
   }
 
   printf("[+] Done. (%zu bytes written)\n", (size_t)written);
   fflush(stdout);
+  return true;
 }
 }
