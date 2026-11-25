@@ -1,5 +1,9 @@
 ## glitter&shine
 
+# Disclaimer
+As of 11-25-26 , glitter&shine is broken , due to heavy changes BSG has made;
+A fix is being worked on.
+
 An automatic global-metadata.dat dumper for EFT
 
 Glitter -> Injector<br>
