@@ -411,6 +411,7 @@ static DWORD WINAPI worker(void *) {
        "global-metadata.dat\",\"Size\":", true},
       {"/GameAssembly.dll", L"GameAssembly.dll",
        "GameAssembly.dll\",\"Size\":", false},
+      {"/baselib.dll", L"baselib.dll", "baselib.dll\",\"Size\":", false},
       {"/UnityPlayer.dll", L"UnityPlayer.dll", "UnityPlayer.dll\",\"Size\":",
        false},
       {"/EscapeFromTarkov.exe", L"EscapeFromTarkov.exe",

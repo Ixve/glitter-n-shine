@@ -10,13 +10,32 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "advapi32.lib")
+
+#ifndef WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL
+#define WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL 133
+#endif
+
+static const int MASK_SIZE = 0x284;
+static const int SECTION_COUNT = 32;
+static const int SECTION_FIRST = 8;
+static const int SECTION_STRIDE = 12;
+static const size_t TABLE_END = SECTION_FIRST + SECTION_COUNT * SECTION_STRIDE;
+static const uint8_t NATIVE_VERSION = 107;
+
+static const int SEC_EVENTS = 3;
+static const int SEC_PROPERTIES = 4;
+static const int SEC_METHODS = 5;
+static const int SEC_FIELDS = 11;
+static const int SEC_GENERIC_CONTAINERS = 14;
+static const int SEC_NESTED_TYPES = 15;
+static const int SEC_INTERFACE_OFFSETS = 18;
+static const int SEC_TYPE_DEFINITIONS = 19;
 
 static uint32_t rd32(const uint8_t *p) {
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
@@ -28,21 +47,6 @@ static void wr32(uint8_t *p, uint32_t v) {
   p[1] = (uint8_t)(v >> 8);
   p[2] = (uint8_t)(v >> 16);
   p[3] = (uint8_t)(v >> 24);
-}
-
-static uint32_t mix(uint32_t v) {
-  v = v % 0x8BAu;
-  v = v * 0x1657A1u;
-  v = v + 0x3CF8479Fu;
-  v = v % 0xC4653218u;
-  return v;
-}
-
-static std::string cstr(const uint8_t *buf, size_t bufLen, size_t start) {
-  std::string out;
-  for (size_t i = start; i < bufLen && buf[i]; ++i)
-    out += (char)buf[i];
-  return out;
 }
 
 static std::string field(const std::string &json, const char *name) {
@@ -84,7 +88,7 @@ deshuffle(const std::vector<uint8_t> &input) {
   std::vector<uint64_t> table(tableSize);
   uint64_t cursor = 0x65F6D;
   for (size_t i = 0; i < tableSize; ++i) {
-    table[i] = (1624453ULL * cursor++ + 1023920427ULL) % 0x8ED7A18DULL;
+    table[i] = (0x18C985ULL * cursor++ + 0x3D07C92BULL) % 0x8ED7A18DULL;
     if (cursor > 0xA53F260DDB0ULL)
       cursor = 0;
   }
@@ -98,359 +102,423 @@ deshuffle(const std::vector<uint8_t> &input) {
   memcpy(&sz, buf.data(), 4);
   if (sz < 0 || (size_t)(4 + sz) > buf.size())
     return std::nullopt;
-
   return std::vector<uint8_t>(buf.begin() + 4, buf.begin() + 4 + sz);
 }
 
-static bool header(std::vector<uint8_t> &m, size_t size) {
-  printf("[?] Decrypting header...\n");
+static uint32_t mix(uint32_t v) {
+  v = v % 0x8B6u;
+  v = v * 0x16579Fu;
+  v = v + 0x3CF8479Fu;
+  v = (uint32_t)((uint64_t)v % 0xC465321Cu);
+  return v;
+}
+
+static bool header(std::vector<uint8_t> &m) {
+  printf("[?] Unmasking header (0x%X)...\n", MASK_SIZE);
   fflush(stdout);
-  if (!size || m.size() < size * 2)
+  if (m.size() < (size_t)MASK_SIZE * 2)
     return false;
-  for (size_t i = 0; i < size; ++i)
-    m[i] ^= m[i + size];
+  for (int i = 0; i < MASK_SIZE; ++i)
+    m[i] ^= m[i + MASK_SIZE];
   return true;
 }
 
 static uint32_t nibble(uint32_t v) {
   uint32_t s8 = (uint32_t)(8u * (v & 0xF1111111u));
   uint32_t sr3 = (v >> 3) & 0x11111111u;
-
   uint32_t p1 = (((v & 0x66666666u) | s8 | sr3) >> 2) & 0x33333333u;
   uint32_t p2 = (uint32_t)(4u * ((v & 0x62222222u) | (s8 & 0xF3333333u) | sr3));
   return p1 | p2;
 }
 
-struct Ver {
+struct Env {
   uint32_t key;
   std::string version;
-  std::string requestKey;
 };
 
-static std::optional<Ver> version(std::vector<uint8_t> &m, uint32_t subKey) {
-  printf("[?] Extracting version and key...\n");
+static std::optional<Env> envelope(std::vector<uint8_t> &m) {
+  printf("[?] Decoding header envelope...\n");
   fflush(stdout);
-
   if (m.size() < 8)
     return std::nullopt;
-  uint32_t size = rd32(m.data());
-  uint32_t offset = rd32(m.data() + 4);
-  if (size < 4 || size % 4 || offset > m.size() || size > m.size() - offset)
+  uint32_t offset = rd32(m.data());
+  uint32_t size = rd32(m.data() + 4);
+  if (offset < 8 || offset > 0x180 || size < 1 || size > 0x100 ||
+      (size_t)offset + size > m.size())
     return std::nullopt;
-  uint32_t count = size / 4;
-  uint32_t key = 0;
 
-  for (uint32_t i = 0; i < count; ++i) {
-    size_t pos = (size_t)offset + i * 4;
-    uint32_t v = rd32(m.data() + pos);
-    v = nibble(v);
-    wr32(m.data() + pos, v);
-    if (i == 0)
-      key = v;
+  for (uint32_t i = 0; i < size / 4; ++i) {
+    size_t p = (size_t)offset + i * 4;
+    wr32(m.data() + p, nibble(rd32(m.data() + p)));
   }
 
-  std::string version = cstr(m.data(), m.size(), (size_t)offset + 4);
-  if (version.empty())
+  Env e;
+  e.key = rd32(m.data() + offset);
+  for (size_t i = (size_t)offset + 4; i < m.size() && m[i]; ++i)
+    e.version += (char)m[i];
+
+  memset(m.data(), 0, 8);
+  if (e.version.empty())
     return std::nullopt;
-  std::string requestKey = std::to_string(mix(key + subKey));
-
-  return Ver{key, version, requestKey};
+  return e;
 }
 
-static void restore(std::vector<uint8_t> &m) {
-  printf("[?] Restoring IL2CPP header...\n");
-  fflush(stdout);
-  wr32(m.data(), 0xFAB11BAFu);
-  wr32(m.data() + 4, 0x1Fu);
-}
-
-struct Prop {
-  uint32_t dataSize, dataOffset;
-};
-
-static std::vector<Prop>
-fetch(uint32_t subKey, const std::string &version,
-                        const std::string &requestKey,
-                        const std::string &session,
-                        const wchar_t *userAgent) {
-  printf("[?] Fetching section layout from server...\n");
-  fflush(stdout);
-
-  std::string body =
-      "{\"version\":\"" + version + "\",\"key\":\"" + requestKey + "\"}";
-
+static DWORD post(const std::string &body, const std::string &session,
+                  std::vector<uint8_t> &out) {
+  out.clear();
   HINTERNET hSess =
-      WinHttpOpen(userAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+      WinHttpOpen(nullptr, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                   WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
   if (!hSess)
-    return {};
+    return 0;
+  WinHttpSetTimeouts(hSess, 60000, 60000, 60000, 120000);
+  DWORD noHttp2 = 0;
+  WinHttpSetOption(hSess, WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL, &noHttp2,
+                   sizeof(noHttp2));
 
   HINTERNET hConn = WinHttpConnect(hSess, L"gw-pvp.escapefromtarkov.com",
                                    INTERNET_DEFAULT_HTTPS_PORT, 0);
   HINTERNET hReq =
-      hConn
-          ? WinHttpOpenRequest(hConn, L"POST", L"/client/metadata", nullptr,
-                               WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                               WINHTTP_FLAG_SECURE)
-          : nullptr;
-
+      hConn ? WinHttpOpenRequest(hConn, L"POST", L"/client/metadata", nullptr,
+                                 WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 WINHTTP_FLAG_SECURE)
+            : nullptr;
   if (!hReq) {
     if (hConn)
       WinHttpCloseHandle(hConn);
     WinHttpCloseHandle(hSess);
-    return {};
+    return 0;
   }
 
-  std::wstring hdrs = L"Cookie: PHPSESSID=";
+  std::wstring hdrs = L"Connection: Keep-Alive\r\nContent-Type: application/json\r\nCookie: PHPSESSID=";
   hdrs.append(session.begin(), session.end());
-  hdrs += L"\r\nContent-Type: application/json\r\n";
-  BOOL added = WinHttpAddRequestHeaders(hReq, hdrs.c_str(), (DWORD)-1,
-                                        WINHTTP_ADDREQ_FLAG_ADD |
-                                            WINHTTP_ADDREQ_FLAG_REPLACE);
+  hdrs += L"\r\n";
+  WinHttpAddRequestHeaders(hReq, hdrs.c_str(), (DWORD)-1,
+                           WINHTTP_ADDREQ_FLAG_ADD |
+                               WINHTTP_ADDREQ_FLAG_REPLACE);
 
-  BOOL sent = added && WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                          (LPVOID)body.data(), (DWORD)body.size(),
-                                          (DWORD)body.size(), 0);
-
-  std::vector<uint8_t> rawResponse;
-  if (sent && WinHttpReceiveResponse(hReq, nullptr)) {
-    DWORD status = 0;
+  DWORD status = 0;
+  if (WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                         (LPVOID)body.data(), (DWORD)body.size(),
+                         (DWORD)body.size(), 0) &&
+      WinHttpReceiveResponse(hReq, nullptr)) {
     DWORD statusSize = sizeof(status);
-    if (WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
-                            WINHTTP_NO_HEADER_INDEX) && status >= 200 && status < 300) {
-      DWORD avail = 0;
-      while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
-        size_t off = rawResponse.size();
-        if (avail > 256 * 1024 * 1024ULL - off) {
-          rawResponse.clear();
-          break;
-        }
-        rawResponse.resize(off + avail);
-        DWORD rd = 0;
-        if (!WinHttpReadData(hReq, rawResponse.data() + off, avail, &rd)) {
-          rawResponse.clear();
-          break;
-        }
-        rawResponse.resize(off + rd);
-      }
+    WinHttpQueryHeaders(hReq,
+                        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
+                        WINHTTP_NO_HEADER_INDEX);
+    DWORD avail = 0;
+    while (status >= 200 && status < 300 &&
+           WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
+      size_t off = out.size();
+      if (avail > 256 * 1024 * 1024ULL - off)
+        break;
+      out.resize(off + avail);
+      DWORD rd = 0;
+      if (!WinHttpReadData(hReq, out.data() + off, avail, &rd))
+        break;
+      out.resize(off + rd);
     }
   }
 
   WinHttpCloseHandle(hReq);
   WinHttpCloseHandle(hConn);
   WinHttpCloseHandle(hSess);
+  return status;
+}
 
-  auto deshuffled = deshuffle(rawResponse);
-  if (!deshuffled) {
-    printf("[-] Failed to deshuffle /client/metadata response\n");
+static std::string fetch(const std::string &version,
+                         const std::string &requestKey,
+                         const std::string &session) {
+  printf("[?] Fetching stripped header bytes from server...\n");
+  fflush(stdout);
+
+  std::string body =
+      "{\"version\":\"" + version + "\",\"key\":\"" + requestKey + "\"}";
+
+  const int ATTEMPTS = 6;
+  for (int attempt = 1; attempt <= ATTEMPTS; ++attempt) {
+    std::vector<uint8_t> raw;
+    DWORD status = post(body, session, raw);
+
+    if (status >= 200 && status < 300 && !raw.empty()) {
+      auto deshuffled = deshuffle(raw);
+      if (deshuffled) {
+        std::string json(deshuffled->begin(), deshuffled->end());
+        std::string value = field(json, "value");
+        if (!value.empty())
+          return value;
+        printf("[-] Response missing 'value' field\n");
+      } else {
+        printf("[-] Failed to deshuffle /client/metadata response\n");
+      }
+    } else {
+      printf("[-] /client/metadata HTTP %lu (attempt %d/%d)\n", status, attempt,
+             ATTEMPTS);
+    }
     fflush(stdout);
-    return {};
+    if (attempt < ATTEMPTS)
+      Sleep((DWORD)attempt * 3000);
   }
+  return {};
+}
 
-  std::string json(deshuffled->begin(), deshuffled->end());
-  std::string value = field(json, "value");
-  if (value.empty()) {
-    printf("[-] Server response missing 'value' field\n");
-    fflush(stdout);
-    return {};
+static std::optional<std::vector<uint8_t>>
+layout(std::string value, uint32_t subKey, uint32_t key) {
+  uint32_t expected = 40 + mix(key) % 40;
+  if (value.size() != (size_t)expected * 2) {
+    printf("[-] Layout value is %zu hex chars, expected %u bytes\n",
+           value.size(), expected);
+    return std::nullopt;
   }
-
-  uint32_t transformed = mix(subKey);
-  for (size_t i = 0; i < value.size(); ++i) {
-    size_t j = (size_t)((uint32_t)transformed % (uint32_t)(i + 1));
+  uint32_t swap = mix(subKey);
+  for (size_t i = 1; i < value.size(); ++i) {
+    size_t j = (size_t)(swap % (uint32_t)(i + 1));
     std::swap(value[i], value[j]);
   }
-
-  if (value.size() % 16 != 0) {
-    printf("[-] Invalid metadata value length (%zu)\n", value.size());
-    fflush(stdout);
-    return {};
+  std::vector<uint8_t> out(value.size() / 2);
+  for (size_t i = 0; i < out.size(); ++i) {
+    char hi = value[i * 2], lo = value[i * 2 + 1];
+    if (!isxdigit((unsigned char)hi) || !isxdigit((unsigned char)lo))
+      return std::nullopt;
+    char pair[3] = {hi, lo, 0};
+    out[i] = (uint8_t)strtoul(pair, nullptr, 16);
   }
-
-  size_t propCount = value.size() / 16;
-  if (!propCount || propCount > 31)
-    return {};
-  std::vector<Prop> props;
-  props.reserve(propCount);
-
-  for (size_t i = 0; i < propCount; ++i) {
-    const char *part = value.data() + i * 16;
-    for (size_t j = 0; j < 16; ++j)
-      if (!isxdigit(static_cast<unsigned char>(part[j])))
-        return {};
-    char sizeText[9] = {};
-    char offsetText[9] = {};
-    memcpy(sizeText, part, 8);
-    memcpy(offsetText, part + 8, 8);
-    uint32_t dataSize = static_cast<uint32_t>(strtoul(sizeText, nullptr, 16));
-    uint32_t dataOffset = static_cast<uint32_t>(strtoul(offsetText, nullptr, 16));
-    printf("[+] Section %02zu: offset=0x%08X  size=0x%08X\n", i, dataOffset,
-           dataSize);
-    props.push_back({dataSize, dataOffset});
-  }
-  fflush(stdout);
-
-  return props;
+  return out;
 }
 
-static uint32_t list_key(const std::vector<Prop> &props) {
-  uint8_t b0 = 0xAA, b1 = 0xAA, b2 = 0xAA, b3 = 0xAA;
-  for (const auto &p : props) {
-    b0 ^= (uint8_t)((p.dataSize & 0xFF) ^ ((p.dataOffset >> 24) & 0xFF));
-    b1 ^= (uint8_t)(((p.dataSize >> 8) & 0xFF) ^ ((p.dataOffset >> 16) & 0xFF));
-    b2 ^= (uint8_t)(((p.dataSize >> 16) & 0xFF) ^ ((p.dataOffset >> 8) & 0xFF));
-    b3 ^= (uint8_t)((p.dataOffset & 0xFF) ^ ((p.dataSize >> 24) & 0xFF));
-  }
-  return (uint32_t)b0 | ((uint32_t)b1 << 8) | ((uint32_t)b2 << 16) |
-         ((uint32_t)b3 << 24);
-}
-
-static void permute(std::vector<uint8_t> &buf,
-                                    uint32_t secretKey) {
-  if (buf.size() <= 1)
-    return;
-
-  constexpr uint64_t KM = 0x8BA;
-  constexpr uint64_t MUL = 0x1657A1;
-  constexpr uint64_t ADD = 0x3CF8479F;
-  constexpr uint64_t FM = 0xC4653218;
-
-  uint64_t reduced = (uint64_t)secretKey % KM;
-  uint64_t swapBase = (ADD + MUL * reduced) % FM;
-
-  for (size_t i = buf.size() - 1; i > 0; --i) {
-    size_t j = (size_t)(swapBase % (uint64_t)(i + 1));
-    std::swap(buf[i], buf[j]);
-  }
-}
-
-static void decrypt_body(std::vector<uint8_t> &m,
-                                  const std::vector<Prop> &props,
-                                  int headerSize) {
-  printf("[?] Decrypting metadata body...\n");
-  fflush(stdout);
-
-  uint32_t hlKey = list_key(props);
-  printf("[+] Header list key: 0x%08X\n", hlKey);
+static void decryptBody(std::vector<uint8_t> &m,
+                        const std::vector<uint8_t> &hb) {
+  uint8_t b[4] = {0xAA, 0xFF, 0x19, 0x69};
+  for (size_t i = 0; i < hb.size(); ++i)
+    b[i & 3] ^= hb[i];
+  uint32_t bodyKey = rd32(b);
+  printf("[+] Body key: 0x%08X\n", bodyKey);
   fflush(stdout);
 
   std::vector<uint8_t> ks(m.size());
   for (size_t i = 0; i < ks.size(); ++i)
     ks[i] = (uint8_t)(i + 2 * (i / 0xFE) + 1);
 
-  permute(ks, hlKey);
+  if (ks.size() > 1) {
+    uint64_t swap =
+        (0x3CF8479FULL + 0x16579FULL * (bodyKey % 0x8B6ULL)) % 0xC465321CULL;
+    for (size_t i = ks.size() - 1; i > 0; --i) {
+      size_t j = (size_t)(swap % (uint64_t)(i + 1));
+      std::swap(ks[i], ks[j]);
+    }
+  }
 
-  for (size_t i = (size_t)headerSize; i < m.size(); ++i)
+  for (size_t i = (size_t)MASK_SIZE; i < m.size(); ++i)
     m[i] ^= ks[i];
 }
 
-static bool reinsert(std::vector<uint8_t> &m, const std::vector<Prop> &props,
+static bool reinsert(std::vector<uint8_t> &m, const std::vector<uint8_t> &hb,
                      uint32_t key) {
-  printf("[?] Reinserting headers...\n");
+  printf("[?] Reinserting %zu stripped header bytes...\n", hb.size());
   fflush(stdout);
-
-  const int N = 31;
-  if (props.empty() || props.size() > N || m.size() < 8 * N + 8 ||
-      m.size() < 8 * props.size())
+  int count = (int)hb.size();
+  const int CAND_FIRST = 8, CAND_COUNT = 388;
+  if (count <= 0 || count > CAND_COUNT ||
+      m.size() < (size_t)(CAND_FIRST + CAND_COUNT) + (size_t)count)
     return false;
 
-  uint32_t transformed = mix(key);
-
   std::vector<int> available;
-  for (int i = 1; i <= N; ++i)
-    available.push_back(i);
-
+  for (int i = 0; i < CAND_COUNT; ++i)
+    available.push_back(CAND_FIRST + i);
   std::vector<int> positions;
-  for (size_t i = 0; i < props.size(); ++i) {
-    int index = (int)((uint32_t)transformed % (uint32_t)(N - (int)i));
-    positions.push_back(available[index]);
-    available.erase(available.begin() + index);
+  uint32_t seed = key;
+  for (int i = 0; i < count; ++i) {
+    seed = mix(seed);
+    int idx = (int)(seed % (uint32_t)available.size());
+    positions.push_back(available[idx]);
+    available.erase(available.begin() + idx);
   }
   std::sort(positions.begin(), positions.end());
 
-  int usedSize = (int)m.size() - 8 * (int)positions.size();
-  for (size_t i = 0; i < positions.size(); ++i) {
-    int offset = positions[i] * 8;
-    if (offset < 0 || offset > usedSize)
+  size_t used = m.size() - count;
+  for (int i = 0; i < count; ++i) {
+    int offset = positions[i];
+    if ((size_t)offset > used)
       return false;
-    memmove(m.data() + offset + 8, m.data() + offset,
-            (size_t)(usedSize - offset));
-    wr32(m.data() + offset, props[i].dataSize);
-    wr32(m.data() + offset + 4, props[i].dataOffset);
-    usedSize += 8;
-  }
-
-  for (int i = 0; i < N; ++i) {
-    int base = 8 + i * 8;
-    uint32_t dSize = rd32(m.data() + base);
-    uint32_t dOff = rd32(m.data() + base + 4);
-    wr32(m.data() + base, dOff);
-    wr32(m.data() + base + 4, dSize);
+    memmove(m.data() + offset + 1, m.data() + offset, used - (size_t)offset);
+    m[offset] = hb[i];
+    ++used;
   }
   return true;
 }
 
+static uint32_t slot(const std::vector<uint8_t> &m, int sec, int which) {
+  return rd32(m.data() + SECTION_FIRST + sec * SECTION_STRIDE + which * 4);
+}
+
+static bool validate(const std::vector<uint8_t> &m) {
+  if (m.size() < TABLE_END)
+    return false;
+  bool ok = true;
+  for (int i = 0; i < SECTION_COUNT; ++i) {
+    uint32_t off = slot(m, i, 0), sz = slot(m, i, 1);
+    if (sz && ((size_t)off < TABLE_END || (size_t)off + sz > m.size())) {
+      printf("[-] section %02d out of range: off=0x%X size=0x%X\n", i, off, sz);
+      ok = false;
+    }
+  }
+  return ok;
+}
+
 static bool reorder(std::vector<uint8_t> &m, uint32_t key) {
-  printf("[?] Reordering type definitions...\n");
+  printf("[?] Reordering type definitions (v106)...\n");
   fflush(stdout);
 
-  constexpr int FIELD_COUNT = 26;
-  constexpr int TD_OFFSET_POS = 160;
-  constexpr int TD_SIZE_POS = 164;
-  constexpr int TD_STRUCT_SIZE = 88;
-  if (m.size() < TD_SIZE_POS + 4)
+  uint32_t tdOff = slot(m, SEC_TYPE_DEFINITIONS, 0);
+  uint32_t tdSize = slot(m, SEC_TYPE_DEFINITIONS, 1);
+  uint32_t tdCount = slot(m, SEC_TYPE_DEFINITIONS, 2);
+  if (!tdCount || tdSize % tdCount || (size_t)tdOff + tdSize > m.size()) {
+    printf("[-] bad typedef section: off=0x%X sz=0x%X cnt=%u\n", tdOff, tdSize,
+           tdCount);
     return false;
+  }
+  int recordSize = (int)(tdSize / tdCount);
 
-  static const int FIELD_SIZES[FIELD_COUNT] = {4, 4, 4, 4, 4, 4, 4, 4, 4,
-                                               4, 4, 4, 4, 4, 4, 4, 2, 2,
-                                               2, 2, 2, 2, 2, 2, 4, 4};
+  auto width = [&](int sec) {
+    uint32_t c = slot(m, sec, 2);
+    return c <= 0xFF ? 1 : c <= 0xFFFF ? 2 : 4;
+  };
+  uint32_t ioSize = slot(m, SEC_INTERFACE_OFFSETS, 1);
+  uint32_t ioCount = slot(m, SEC_INTERFACE_OFFSETS, 2);
+  if (!ioCount) {
+    printf("[-] interfaceOffsets.count=0\n");
+    return false;
+  }
+  int T = (int)(ioSize / ioCount) - 4;
+  if (T != 1 && T != 2 && T != 4) {
+    printf("[-] bad TypeIndex width %d (ioSize=%u ioCount=%u)\n", T, ioSize,
+           ioCount);
+    return false;
+  }
+  int G = width(SEC_GENERIC_CONTAINERS);
+  int F = width(SEC_FIELDS);
+  int M = width(SEC_METHODS);
+  int E = width(SEC_EVENTS);
+  int P = width(SEC_PROPERTIES);
+  int N = width(SEC_NESTED_TYPES);
+  int I = width(SEC_INTERFACE_OFFSETS);
+  printf("[+] v106 typedef widths T=%d G=%d F=%d M=%d E=%d P=%d N=%d I=%d\n", T,
+         G, F, M, E, P, N, I);
 
-  uint32_t transformed = mix(key);
-
-  int fieldOrder[FIELD_COUNT];
-  for (int i = 0; i < FIELD_COUNT; ++i)
-    fieldOrder[i] = i;
-  for (int i = 0; i < FIELD_COUNT; ++i) {
-    int from = FIELD_COUNT - 1 - i;
-    int to = (int)((uint32_t)transformed % (uint32_t)(from + 1));
-    std::swap(fieldOrder[from], fieldOrder[to]);
+  const int TD = 25;
+  int sizes[TD] = {4, 4, T, T, T, G, 4, F, M, E, P, N, I,
+                   4, I, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4};
+  int sum = 0;
+  for (int i = 0; i < TD; ++i)
+    sum += sizes[i];
+  if (sum != recordSize) {
+    printf("[-] v106 field sum %d != record %d\n", sum, recordSize);
+    return false;
   }
 
-  int fieldOffsets[FIELD_COUNT] = {};
+  uint32_t swap = mix(key);
+  int order[TD];
+  for (int i = 0; i < TD; ++i)
+    order[i] = i;
+  for (int i = 0; i < TD; ++i) {
+    int from = TD - 1 - i;
+    int to = (int)(swap % (uint32_t)(from + 1));
+    std::swap(order[from], order[to]);
+  }
+
+  int offs[TD] = {};
   int running = 0;
-  for (int i = 0; i < FIELD_COUNT; ++i) {
-    int f = fieldOrder[i];
-    fieldOffsets[f] = running;
-    running += FIELD_SIZES[f];
+  for (int i = 0; i < TD; ++i) {
+    offs[order[i]] = running;
+    running += sizes[order[i]];
   }
 
-  uint32_t rawOffset = rd32(m.data() + TD_OFFSET_POS);
-  uint32_t rawSize = rd32(m.data() + TD_SIZE_POS);
-  if (rawSize % TD_STRUCT_SIZE || rawOffset > m.size() ||
-      rawSize > m.size() - rawOffset)
-    return false;
-
-  std::vector<uint8_t> tmp(TD_STRUCT_SIZE);
-  for (uint32_t rel = 0; rel < rawSize; rel += TD_STRUCT_SIZE) {
-    size_t entryBase = rawOffset + rel;
+  std::vector<uint8_t> tmp(recordSize);
+  for (uint32_t rel = 0; rel < tdSize; rel += recordSize) {
+    uint8_t *entry = m.data() + tdOff + rel;
     int dst = 0;
-    for (int field = 0; field < FIELD_COUNT; ++field) {
-      int sz = FIELD_SIZES[field];
-      memcpy(tmp.data() + dst, m.data() + entryBase + fieldOffsets[field],
-             (size_t)sz);
-      dst += sz;
+    for (int f = 0; f < TD; ++f) {
+      memcpy(tmp.data() + dst, entry + offs[f], sizes[f]);
+      dst += sizes[f];
     }
-    memcpy(m.data() + entryBase, tmp.data(), TD_STRUCT_SIZE);
+    memcpy(entry, tmp.data(), recordSize);
   }
   return true;
+}
+
+static void normalize(std::vector<uint8_t> &m) {
+  if (m.size() < TABLE_END)
+    return;
+  struct Raw {
+    uint32_t a, b, c;
+  };
+  Raw raw[SECTION_COUNT];
+  for (int i = 0; i < SECTION_COUNT; ++i)
+    raw[i] = {slot(m, i, 0), slot(m, i, 1), slot(m, i, 2)};
+  for (int i = 0; i < SECTION_COUNT; ++i) {
+    uint8_t *p = m.data() + SECTION_FIRST + i * SECTION_STRIDE;
+    wr32(p, raw[i].b);
+    wr32(p + 4, raw[i].c);
+    wr32(p + 8, i + 1 < SECTION_COUNT ? raw[i + 1].a : raw[i].c / 4);
+  }
+}
+
+static void scrub(std::vector<uint8_t> &m) {
+  if (m.size() <= TABLE_END)
+    return;
+
+  uint32_t first = 0xFFFFFFFFu;
+  for (int i = 0; i < SECTION_COUNT; ++i) {
+    uint32_t off = slot(m, i, 0), sz = slot(m, i, 1);
+    if (sz && off && off < first)
+      first = off;
+  }
+  static const size_t MAX_PAD = 0x1000;
+  if (first == 0xFFFFFFFFu || (size_t)first <= TABLE_END ||
+      (size_t)first > m.size() || (size_t)first - TABLE_END > MAX_PAD) {
+    printf("[-] Refusing to scrub header padding (earliest section %u, table "
+           "ends %zu)\n",
+           first, TABLE_END);
+    fflush(stdout);
+    return;
+  }
+
+  size_t wiped = (size_t)first - TABLE_END;
+  memset(m.data() + TABLE_END, 0, wiped);
+  printf("[+] Cleared %zu bytes of BSG header padding\n", wiped);
+  fflush(stdout);
+}
+
+static bool save(const std::wstring &path, const std::vector<uint8_t> &data) {
+  char a[MAX_PATH * 2] = {};
+  WideCharToMultiByte(CP_ACP, 0, path.c_str(), -1, a, sizeof(a), nullptr, nullptr);
+  HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                         FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    printf("[-] Cannot create %s (err=%lu)\n", a, GetLastError());
+    fflush(stdout);
+    return false;
+  }
+  DWORD wrote = 0;
+  BOOL ok = WriteFile(h, data.data(), (DWORD)data.size(), &wrote, nullptr) &&
+            FlushFileBuffers(h) && wrote == data.size();
+  CloseHandle(h);
+  if (!ok) {
+    DeleteFileW(path.c_str());
+    printf("[-] Failed to write %s\n", a);
+  } else {
+    printf("[+] Wrote %s (%zu bytes)\n", a, data.size());
+  }
+  fflush(stdout);
+  return ok;
 }
 
 namespace meta {
 bool decrypt(std::vector<uint8_t> metadata, uint64_t fileTime,
              const std::string &session, const wchar_t *outputDir,
-             const wchar_t *userAgent) {
-
+             const wchar_t *) {
   if (session.empty()) {
     printf("[-] No game session supplied\n");
     fflush(stdout);
@@ -461,94 +529,75 @@ bool decrypt(std::vector<uint8_t> metadata, uint64_t fileTime,
     fflush(stdout);
     return false;
   }
+
+  std::wstring dir = outputDir;
+  if (!dir.empty() && dir.back() != L'\\')
+    dir += L'\\';
+
+  save(dir + L"encrypted_global-metadata.dat", metadata);
+
   printf("[?] Decrypting global-metadata.dat (%zu bytes)\n", metadata.size());
   fflush(stdout);
 
   if (rd32(metadata.data()) == 0xFAB11BAFu) {
-    printf("[+] Metadata already decrypted - nothing to do\n");
+    printf("[+] Input already decrypted; writing as native output.\n");
     fflush(stdout);
-    return false;
+    return save(dir + L"global-metadata.dat", metadata);
   }
 
-  uint32_t subKey =
-      (mix((uint32_t)(fileTime & 0xFFFFFFFF)) % 0xA) + 5;
+  uint32_t subKey = (mix((uint32_t)(fileTime & 0xFFFFFFFF)) % 0xA) + 5;
   printf("[+] File time: 0x%016llX  subKey: %u\n", (unsigned long long)fileTime,
          subKey);
   fflush(stdout);
 
-  const int HEADER_SIZE = 0x200;
-  if (!header(metadata, HEADER_SIZE))
+  if (!header(metadata)) {
+    printf("[-] Header unmask failed\n");
+    fflush(stdout);
     return false;
-
-  auto vi = version(metadata, subKey);
-  if (!vi) {
+  }
+  auto env = envelope(metadata);
+  if (!env) {
     printf("[-] Invalid encrypted metadata header\n");
     fflush(stdout);
     return false;
   }
-  printf("[+] Version:     %s\n", vi->version.c_str());
-  printf("[+] Request key: %s\n", vi->requestKey.c_str());
-  printf("[+] Raw key:     0x%08X\n", vi->key);
+  std::string requestKey = std::to_string(mix(env->key + subKey));
+  printf("[+] Version: %s  key: 0x%08X  requestKey: %s\n", env->version.c_str(),
+         env->key, requestKey.c_str());
   fflush(stdout);
 
-  restore(metadata);
-
-  auto props = fetch(subKey, vi->version, vi->requestKey, session, userAgent);
-  if (props.empty()) {
-    printf("[-] Failed to obtain header properties from server\n");
+  std::string value = fetch(env->version, requestKey, session);
+  if (value.empty()) {
+    printf("[-] Failed to obtain stripped header bytes from server\n");
     fflush(stdout);
     return false;
   }
-  printf("[+] Server returned %zu sections\n", props.size());
+  auto hb = layout(value, subKey, env->key);
+  if (!hb) {
+    printf("[-] Invalid layout value from server\n");
+    fflush(stdout);
+    return false;
+  }
+  printf("[+] Stripped header bytes: %zu\n", hb->size());
   fflush(stdout);
 
-  decrypt_body(metadata, props, HEADER_SIZE);
-
-  if (!reinsert(metadata, props, vi->key)) {
-    printf("[-] Invalid metadata sections\n");
+  decryptBody(metadata, *hb);
+  if (!reinsert(metadata, *hb, env->key)) {
+    printf("[-] Header reinsertion failed\n");
     fflush(stdout);
     return false;
   }
 
-  if (!reorder(metadata, vi->key)) {
-    printf("[-] Invalid type definitions\n");
-    fflush(stdout);
-    return false;
-  }
+  normalize(metadata);
+  if (!validate(metadata))
+    printf("[-] section table still out of range after normalisation\n");
+  if (!reorder(metadata, env->key))
+    printf("[!!!] v106 typedef reorder failed\n");
+  scrub(metadata);
+  wr32(metadata.data(), 0xFAB11BAFu);
+  metadata[4] = NATIVE_VERSION;
+  metadata[5] = metadata[6] = metadata[7] = 0;
 
-  std::wstring outPath = outputDir;
-  if (!outPath.empty() && outPath.back() != L'\\')
-    outPath += L'\\';
-  outPath += L"global-metadata.dat";
-
-  char outPathA[MAX_PATH * 2] = {};
-  WideCharToMultiByte(CP_ACP, 0, outPath.c_str(), -1, outPathA,
-                      sizeof(outPathA), nullptr, nullptr);
-  printf("[?] Writing global-metadata.dat to %s...\n", outPathA);
-  fflush(stdout);
-
-  HANDLE hOut = CreateFileW(outPath.c_str(), GENERIC_WRITE, 0, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (hOut == INVALID_HANDLE_VALUE) {
-    printf("[-] Cannot create output file (err=%lu)\n", GetLastError());
-    fflush(stdout);
-    return false;
-  }
-  DWORD written = 0;
-  BOOL wrote = WriteFile(hOut, metadata.data(), (DWORD)metadata.size(), &written,
-                         nullptr);
-  BOOL flushed = FlushFileBuffers(hOut);
-  CloseHandle(hOut);
-
-  if (!wrote || !flushed || written != metadata.size()) {
-    DeleteFileW(outPath.c_str());
-    printf("[-] Failed to write output file\n");
-    fflush(stdout);
-    return false;
-  }
-
-  printf("[+] Done. (%zu bytes written)\n", (size_t)written);
-  fflush(stdout);
-  return true;
+  return save(dir + L"global-metadata.dat", metadata);
 }
 }

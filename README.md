@@ -1,9 +1,10 @@
 ## glitter&shine
 
 # Disclaimer
-As of 11-25-26 , glitter&shine is broken , due to heavy changes BSG has made;
-A fix is being worked on.
 
+The "how does this work" part is outdated post-unity6 update, I cba updating it
+
+<br><br>
 An automatic global-metadata.dat dumper for EFT
 
 Glitter -> Injector<br>
